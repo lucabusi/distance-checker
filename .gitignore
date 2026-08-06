@@ -1,0 +1,12 @@
+# IDE
+.vscode/
+*.suo
+*.user
+*.code-workspace
+
+# claude
+.claude/
+CLAUDE.md
+
+# extra
+analytics.js

@@ -427,10 +427,22 @@ const BANDS = [
   {label:'Serata',         sub:'lun 20:00', hour:20},
 ];
 
-// Anelli delle tre passate della zona ottimale: grossolana, fine, ultrafine
-// (49+49+25 candidati). Dichiarata qui perché renderPlaces() la legge già in
-// fase di init, per stimare il costo del calcolo con Google.
+// Passate di raffinamento della zona ottimale: anelli e raggio (come frazione
+// del raggio di ricerca). Ogni passata è centrata sul vincitore della precedente,
+// quindi costa un round-trip che non si può parallelizzare — mentre i blocchi
+// dentro una passata partono insieme.
+//
+// Ridurre le passate per risparmiare un round-trip è tentante e sbagliato: le
+// iterazioni di ri-centraggio pesano più della densità della griglia. Misurato
+// sui 5 indirizzi di esempio, score ponderato (più basso = meglio):
+//   [3,3,2] 123 candidati -> 11.6 km      [4,5]   202 candidati -> 11.9 km
+//   [3,5]   170 candidati -> 12.0 km      [3,4]   130 candidati -> 12.8 km
+//   [3,3,1] 107 candidati -> 12.9 km
+// Nessuna variante a due passate regge il confronto, nemmeno spendendo il 64%
+// di candidati in più. Prima di toccare questi numeri, rifare la misura.
+// renderPlaces() li legge già in fase di init per stimare il costo con Google.
 const GRID_STEPS=[3,3,2];
+const GRID_RADIUS=[1,0.35,0.14];
 
 // ─── INIT ─────────────────────────────────────────────────────────────────────
 renderPlaces();
@@ -530,11 +542,19 @@ function setMode(mode,btn){
 // Distanzia le richieste a uno stesso servizio, ovunque partano: chi chiama non
 // deve ricordarsi del limite. Nominatim ammette 1 richiesta/s; il geocoder JS di
 // Google risponde OVER_QUERY_LIMIT se lo si martella a raffica.
-const lastCallAt={};
+// Le richieste allo stesso servizio si mettono in coda: senza la catena di
+// promesse, N chiamate concorrenti leggerebbero tutte lo stesso lastCallAt e
+// partirebbero insieme, che è esattamente ciò che il distanziamento deve evitare.
+const lastCallAt={}, paceChain={};
 async function paceCall(key, minMs){
+  const prev = paceChain[key] || Promise.resolve();
+  let release;
+  paceChain[key] = new Promise(r=>{release=r;});
+  await prev;
   const wait = minMs - (Date.now() - (lastCallAt[key]||0));
   if(wait>0) await new Promise(r=>setTimeout(r,wait));
   lastCallAt[key]=Date.now();
+  release();
 }
 
 // ─── GEOCODE (Nominatim) ──────────────────────────────────────────────────────
@@ -558,7 +578,7 @@ async function geocodeNominatim(query) {
 
 // Google Geocoding (usa SDK)
 async function geocodeGoogle(address) {
-  await paceCall('gmGeocode',200);
+  await paceCall('gmGeocode',30);   // ~33 richieste/s, sotto le 50 ammesse da Google
   return new Promise((resolve,reject)=>{
     if(!gmSDKLoaded) { reject(new Error('SDK Google Maps non caricato')); return; }
     const gc = new google.maps.Geocoder();
@@ -1042,9 +1062,9 @@ function updateGmScoringCost(n){
   if(!el) return;
   if(!n){ el.textContent=''; return; }
   const cand = GRID_STEPS.reduce((tot,s)=>tot+makeGrid(0,0,1,s).length,0);
-  const elements = cand*n + n;              // griglie + distanze finali
+  const elements = cand*n;   // le distanze finali sono già nella matrice dell'ultima passata
   const perReq = Math.min(25, Math.floor(100/n));
-  const reqs = GRID_STEPS.reduce((tot,s)=>tot+Math.ceil(makeGrid(0,0,1,s).length/perReq),0) + 1;
+  const reqs = GRID_STEPS.reduce((tot,s)=>tot+Math.ceil(makeGrid(0,0,1,s).length/perReq),0);
   el.textContent = `Costo: ~${elements} elementi Distance Matrix per calcolo (${reqs} richieste, ${cand} posizioni candidate × ${n} luoghi). Con OSRM è gratis.`;
 }
 
@@ -1126,7 +1146,9 @@ async function osrmTableScores(candidates, points, wNorm, onChunk){
     if(onChunk) onChunk(Math.min(start+TABLE_CHUNK,candidates.length), candidates.length);
     if(start+TABLE_CHUNK < candidates.length) await new Promise(r=>setTimeout(r,300));
   }
-  return scores;
+  // dists null: il percorso OSRM interroga comunque /route a fine calcolo, che
+  // gli serve per le geometrie della mappa e gli dà anche distanze e tempi.
+  return {scores, dists:null};
 }
 
 // ── Score Google in blocco: Distance Matrix a blocchi ──────────────────────────
@@ -1141,45 +1163,64 @@ function gmScoringEnabled(){
 async function gmTableScores(candidates, points, wNorm, onChunk){
   const maxOrigins = Math.min(25, Math.floor(100/points.length));
   if(maxOrigins<1) throw new Error('troppi luoghi per una singola richiesta');
-  const scores=[];
   const destLL = points.map(p=>new google.maps.LatLng(p.lat,p.lon));
-  for(let start=0; start<candidates.length; start+=maxOrigins){
-    const chunk = candidates.slice(start, start+maxOrigins);
+  const chunks=[];
+  for(let start=0; start<candidates.length; start+=maxOrigins)
+    chunks.push(candidates.slice(start, start+maxOrigins));
+
+  // I blocchi di una stessa griglia sono indipendenti fra loro, quindi partono
+  // insieme: sono al massimo una manciata, contro una quota di 60.000 elementi
+  // al minuto. Le tre griglie invece restano in sequenza — ognuna è centrata sul
+  // vincitore della precedente, e quella dipendenza non si può parallelizzare.
+  let done=0;
+  const blocks = await Promise.all(chunks.map(async chunk=>{
     const origLL = chunk.map(c=>new google.maps.LatLng(c.lat,c.lon));
     const res = await gmDistanceMatrix(origLL, destLL, currentMode, null);
+    done += chunk.length;
+    if(onChunk) onChunk(Math.min(done,candidates.length), candidates.length);
+    return {chunk,res};
+  }));
+
+  // Si tengono anche le distanze per singolo luogo: quelle del vincitore sono
+  // esattamente i numeri da mostrare a fine calcolo, che così non vanno richiesti
+  // una seconda volta.
+  const scores=[], dists=[];
+  blocks.forEach(({chunk,res})=>{        // Promise.all conserva l'ordine dei blocchi
     res.rows.forEach((row,i)=>{
-      let score=0;
+      let score=0; const row_=[];
       for(let j=0;j<points.length;j++){
         const el=row.elements[j];
         // elemento non calcolabile (ZERO_RESULTS su trasporti, ecc.): linea d'aria
-        score += wNorm[j] * (el && el.status==='OK'
-          ? el.distance.value/1000
-          : haversine(chunk[i].lat,chunk[i].lon,points[j].lat,points[j].lon));
+        const ok = el && el.status==='OK';
+        const km = ok ? el.distance.value/1000
+                      : haversine(chunk[i].lat,chunk[i].lon,points[j].lat,points[j].lon);
+        row_.push({km:+km.toFixed(1), min: ok ? Math.round(el.duration.value/60) : null});
+        score += wNorm[j]*km;
       }
-      scores.push(score);
+      scores.push(score); dists.push(row_);
     });
-    if(onChunk) onChunk(Math.min(start+maxOrigins,candidates.length), candidates.length);
-  }
-  return scores;
+  });
+  return {scores, dists};
 }
 
 // ── Valuta una griglia e ritorna il candidato migliore ──
 // Un blocco di richieste invece di una per coppia; se lo scorer scelto non
 // risponde si ripiega sulle chiamate /route una per coppia (lento ma equivalente).
 async function evaluateGrid(grid, points, wNorm, current, area, pctFrom, pctTo, label){
-  let best={...current}, scores=null;
+  let best={...current}, scores=null, dists=null;
   const useGm = gmScoringEnabled();
   try{
     const onChunk=(done,tot)=>setOptimalProgress(area, pctFrom+(pctTo-pctFrom)*done/tot,
       `${label} — ${done}/${tot} candidati${useGm?' (Google)':''}...`);
-    scores = useGm
+    ({scores,dists} = useGm
       ? await gmTableScores(grid, points, wNorm, onChunk)
-      : await osrmTableScores(grid, points, wNorm, onChunk);
+      : await osrmTableScores(grid, points, wNorm, onChunk));
   }catch(e){
     console.warn(`Scoring in blocco non disponibile (${e.message}), fallback su /route`);
   }
   if(scores){
-    scores.forEach((s,i)=>{ if(s<best.score) best={lat:grid[i].lat,lon:grid[i].lon,score:s}; });
+    scores.forEach((s,i)=>{ if(s<best.score)
+      best={lat:grid[i].lat,lon:grid[i].lon,score:s,dists:dists?dists[i]:null}; });
     setOptimalProgress(area, pctTo, `${label} — score migliore: ${best.score.toFixed(1)} km`);
   }else{
     for(let i=0;i<grid.length;i++){
@@ -1254,12 +1295,18 @@ async function calcOptimalZone(){
   try{
     // ── FASE 1: Geocoding ──────────────────────────────────────────────────────
     const n=filled.length;
-    const geocoded=[];
-    for(let i=0;i<n;i++){
-      // il distanziamento tra richieste è gestito dai geocoder stessi (paceCall)
-      const g=await geocodeResilient(filled[i].address);
-      geocoded.push(g);
-      setOptimalProgress(area, Math.round((i+1)/n*10), `Geocoding ${i+1}/${n}...`);
+    let geocoded;
+    if(currentProvider==='google' && gmSDKLoaded){
+      // Google regge decine di geocodifiche al secondo: partono tutte insieme.
+      setOptimalProgress(area, 5, `Geocoding di ${n} luoghi...`);
+      geocoded = await Promise.all(filled.map(p=>geocodeResilient(p.address)));
+    }else{
+      // Nominatim ammette 1 richiesta/s: restano in fila, la coda è in paceCall
+      geocoded=[];
+      for(let i=0;i<n;i++){
+        geocoded.push(await geocodeResilient(filled[i].address));
+        setOptimalProgress(area, Math.round((i+1)/n*10), `Geocoding ${i+1}/${n}...`);
+      }
     }
 
     // Pesi normalizzati
@@ -1275,66 +1322,62 @@ async function calcOptimalZone(){
     const maxAerialKm = Math.max(...geocoded.map(g=>haversine(aerial.lat,aerial.lon,g.lat,g.lon)));
     const searchRadius = Math.min(Math.max(maxAerialKm*0.6, 3), 30); // tra 3 e 30 km
 
-    // ── FASE 3: Griglia grossolana (radius, 3 anelli) → trova la zona migliore ─
-    setOptimalProgress(area, 15, `Griglia grossolana (raggio ~${searchRadius.toFixed(0)} km)...`);
-    const coarseGrid = makeGrid(aerial.lat, aerial.lon, searchRadius, GRID_STEPS[0]);
-    const coarseBest = await evaluateGrid(coarseGrid, geocoded, wNorm,
-      {lat:aerial.lat, lon:aerial.lon, score:Infinity}, area, 15, 50, 'Griglia grossolana');
-
-    // ── FASE 4: Griglia fine attorno al miglior candidato grossolano ───────────
-    const fineRadius = searchRadius * 0.35;
-    const fineGrid = makeGrid(coarseBest.lat, coarseBest.lon, fineRadius, GRID_STEPS[1]);
-    const fineBest = await evaluateGrid(fineGrid, geocoded, wNorm,
-      coarseBest, area, 50, 80, 'Griglia fine');
-
-    // ── FASE 5: Griglia ultrafine attorno al miglior candidato fine ────────────
-    const ultraRadius = fineRadius * 0.4;
-    const ultraGrid = makeGrid(fineBest.lat, fineBest.lon, ultraRadius, GRID_STEPS[2]);
-    const best = await evaluateGrid(ultraGrid, geocoded, wNorm,
-      fineBest, area, 80, 90, 'Rifinitura zona');
+    // ── FASI 3-N: passate di raffinamento a griglia concentrica ───────────────
+    const nPass = GRID_STEPS.length;
+    let best = {lat:aerial.lat, lon:aerial.lon, score:Infinity, dists:null};
+    for(let p=0;p<nPass;p++){
+      const radius = searchRadius * GRID_RADIUS[p];
+      const grid = makeGrid(best.lat, best.lon, radius, GRID_STEPS[p]);
+      best = await evaluateGrid(grid, geocoded, wNorm, best, area,
+        15+75*p/nPass, 15+75*(p+1)/nPass,
+        `Passata ${p+1}/${nPass} (raggio ~${radius.toFixed(1)} km)`);
+    }
 
     // ── FASE 6: Distanze finali dal punto ottimale a ciascun luogo ────────────
     setOptimalProgress(area, 91, 'Calcolo distanze stradali finali...');
-    const roadDists=[];
-    const roadGeoms=[];  // geometrie stradali per la mappa
-    for(let i=0;i<geocoded.length;i++){
-      await new Promise(r=>setTimeout(r,200));
+    // Il reverse geocoding va su Nominatim, le geometrie su OSRM: servizi diversi,
+    // quindi si sovrappongono invece di aspettarsi in fila.
+    const bestAddressPromise = (async()=>{
       try{
-        const mode=currentMode==='transit'?'car':currentMode;
-        const r=await getRouteOSRM({lat:best.lat,lon:best.lon},geocoded[i],mode);
-        roadDists.push({km:parseFloat(r.distance_km),min:r.duration_min});
-        roadGeoms.push(r.geometry); // [[lon,lat], ...]
-      }catch(e){
-        roadDists.push({km:parseFloat(haversine(best.lat,best.lon,geocoded[i].lat,geocoded[i].lon).toFixed(1)),min:null});
-        roadGeoms.push(null);
+        await paceCall('nominatim',1100);
+        const rev=await fetch(`https://nominatim.openstreetmap.org/reverse?lat=${best.lat}&lon=${best.lon}&format=json`,{headers:{'Accept-Language':'it'}});
+        const revData=await rev.json();
+        if(revData.display_name) return revData.display_name;
+      }catch(e){}
+      return `${best.lat.toFixed(5)}, ${best.lon.toFixed(5)}`;
+    })();
+    const roadDists=new Array(n);
+    const roadGeoms=new Array(n);  // geometrie stradali per la mappa
+    // Le n richieste sono indipendenti: qualcuna in parallelo, non tutte insieme,
+    // perché il demo server OSRM è una risorsa condivisa e gratuita.
+    let nextGeom=0, doneGeom=0;
+    const geomWorker=async()=>{
+      for(let i=nextGeom++; i<n; i=nextGeom++){
+        try{
+          const mode=currentMode==='transit'?'car':currentMode;
+          const r=await getRouteOSRM({lat:best.lat,lon:best.lon},geocoded[i],mode);
+          roadDists[i]={km:parseFloat(r.distance_km),min:r.duration_min};
+          roadGeoms[i]=r.geometry; // [[lon,lat], ...]
+        }catch(e){
+          roadDists[i]={km:parseFloat(haversine(best.lat,best.lon,geocoded[i].lat,geocoded[i].lon).toFixed(1)),min:null};
+          roadGeoms[i]=null;
+        }
+        setOptimalProgress(area, 91+Math.round(++doneGeom/n*6), `Distanze stradali ${doneGeom}/${n}...`);
       }
-      setOptimalProgress(area, 91+Math.round((i+1)/n*6), `Distanze stradali ${i+1}/${n}...`);
-    }
+    };
+    await Promise.all([geomWorker(),geomWorker(),geomWorker()]);
 
     // Con lo scoring Google i numeri mostrati devono venire dalla stessa fonte
-    // dello score, o la somma non torna col punteggio. Le geometrie per la mappa
-    // restano OSRM: Distance Matrix non le fornisce.
-    if(gmScoringEnabled()){
-      try{
-        const res=await gmDistanceMatrix(
-          [new google.maps.LatLng(best.lat,best.lon)],
-          geocoded.map(g=>new google.maps.LatLng(g.lat,g.lon)), currentMode, null);
-        res.rows[0].elements.forEach((el,i)=>{
-          if(el && el.status==='OK')
-            roadDists[i]={km:+(el.distance.value/1000).toFixed(1), min:Math.round(el.duration.value/60)};
-        });
-      }catch(e){ console.warn('Distanze finali Google non disponibili:', e.message); }
-    }
+    // dello score, o la somma non torna col punteggio. Sono già stati calcolati
+    // nell'ultima passata: quelli del vincitore sono la sua riga della matrice,
+    // quindi non serve richiederli. Le geometrie per la mappa restano OSRM,
+    // perché Distance Matrix non le fornisce.
+    if(gmScoringEnabled() && best.dists)
+      best.dists.forEach((d,i)=>{ roadDists[i]=d; });
 
-    // ── FASE 7: Reverse geocoding ──────────────────────────────────────────────
+    // ── FASE 7: Reverse geocoding (avviato in parallelo alla fase 6) ───────────
     setOptimalProgress(area, 98, 'Reverse geocoding del punto ottimale...');
-    let bestAddress = `${best.lat.toFixed(5)}, ${best.lon.toFixed(5)}`;
-    try{
-      await paceCall('nominatim',1100);
-      const rev=await fetch(`https://nominatim.openstreetmap.org/reverse?lat=${best.lat}&lon=${best.lon}&format=json`,{headers:{'Accept-Language':'it'}});
-      const revData=await rev.json();
-      if(revData.display_name) bestAddress=revData.display_name;
-    }catch(e){}
+    const bestAddress = await bestAddressPromise;
 
     // ── FASE 8: Render risultato ───────────────────────────────────────────────
     const finalScore = best.score;

@@ -4,6 +4,11 @@ Web app in una singola pagina HTML per calcolare distanze e tempi di percorrenza
 
 Nessun build, nessuna installazione, nessun backend: un solo file da aprire nel browser.
 
+![Type](https://img.shields.io/badge/type-Single%20File%20HTML-orange)
+![Runtime](https://img.shields.io/badge/runtime-Browser-blue)
+![Server](https://img.shields.io/badge/server-not%20required-success)
+![License](https://img.shields.io/badge/license-MIT-green)
+
 ## Funzionalità
 
 - **Andata e ritorno separati** per ogni destinazione, con evidenza delle differenze dovute a sensi unici.

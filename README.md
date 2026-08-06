@@ -15,7 +15,7 @@ Nessun build, nessuna installazione, nessun backend: un solo file da aprire nel 
 - **Fino a 8 luoghi fissi** + un punto di partenza, geocodificati per indirizzo o nome.
 - **4 modalità**: auto, bicicletta, a piedi, trasporti pubblici (solo Google).
 - **Mappa per ogni tratta**, con percorso reale disegnato sulle strade.
-- **Zona ottimale**: dati i luoghi e una priorità 1-10 per ciascuno, cerca il punto che minimizza la distanza stradale ponderata verso tutti. Confronta il risultato con il semplice centroide in linea d'aria.
+- **Zona ottimale**: dati i luoghi e una priorità 1-10 per ciascuno, cerca il punto che minimizza la distanza stradale ponderata verso tutti. Confronta il risultato con il semplice centroide in linea d'aria. Funziona con entrambe le fonti dati; con Google si può opzionalmente calcolare anche le distanze via Distance Matrix, necessario per i trasporti pubblici (il costo stimato in elementi è mostrato prima di avviare).
 - **Traffico per fascia oraria** (solo Google): 6 fasce del prossimo lunedì, dalle 07:00 alle 20:00, basate sui dati storici del traffico.
 
 ## Due fonti dati

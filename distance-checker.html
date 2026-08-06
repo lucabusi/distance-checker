@@ -227,6 +227,15 @@ input[type="text"]::placeholder{color:var(--muted);}
 .btn-optimal:active{transform:translateY(0);box-shadow:none;}
 .btn-optimal:disabled{opacity:.35;cursor:not-allowed;transform:none;box-shadow:none;}
 
+.gm-scoring{display:none;align-items:flex-start;gap:9px;margin-bottom:16px;padding:10px 12px;
+  background:var(--card);border:1.5px solid var(--border);border-radius:7px;}
+.gm-scoring.show{display:flex;}
+.gm-scoring input{margin-top:2px;accent-color:var(--accent-pop);cursor:pointer;flex-shrink:0;}
+.gm-scoring label{font-family:'DM Mono',monospace;font-size:.64rem;color:var(--muted);
+  line-height:1.6;cursor:pointer;}
+.gm-scoring label b{color:var(--text);font-weight:500;}
+.gm-cost{color:var(--traffic-mid);}
+
 .optimal-weights{display:grid;gap:6px;margin-bottom:18px;}
 .weight-row{display:grid;grid-template-columns:24px 1fr 120px 32px;gap:8px;align-items:center;}
 .weight-idx{font-family:'DM Mono',monospace;font-size:.7rem;color:var(--muted);text-align:center;
@@ -366,6 +375,15 @@ input[type="text"]::placeholder{color:var(--muted);}
     </div>
     <button class="btn-optimal" id="btn-optimal" onclick="calcOptimalZone()">Trova zona →</button>
   </div>
+  <div class="gm-scoring" id="gm-scoring">
+    <input type="checkbox" id="gm-scoring-chk"/>
+    <label for="gm-scoring-chk">
+      <b>Calcola le distanze con Google invece che con OSRM.</b><br>
+      Necessario per i <b>trasporti pubblici</b>, che OSRM non sa instradare (senza, la
+      modalità 🚌 viene calcolata come se fosse in auto).<br>
+      <span class="gm-cost" id="gm-scoring-cost"></span>
+    </label>
+  </div>
   <div id="optimal-weights-container">
     <div class="section-label" style="margin-bottom:8px">Priorità per luogo <span style="font-size:.58rem;color:var(--muted)">(trascina per regolare · 1=bassa · 10=alta)</span></div>
     <div class="optimal-weights" id="optimal-weights"></div>
@@ -409,6 +427,11 @@ const BANDS = [
   {label:'Serata',         sub:'lun 20:00', hour:20},
 ];
 
+// Anelli delle tre passate della zona ottimale: grossolana, fine, ultrafine
+// (49+49+25 candidati). Dichiarata qui perché renderPlaces() la legge già in
+// fase di init, per stimare il costo del calcolo con Google.
+const GRID_STEPS=[3,3,2];
+
 // ─── INIT ─────────────────────────────────────────────────────────────────────
 renderPlaces();
 if (gmKey) {
@@ -437,6 +460,7 @@ function setProvider(prov, btn) {
   btn.classList.add('active');
   document.getElementById('gm-panel').classList.toggle('visible', prov==='google');
   document.querySelectorAll('.mode-btn.gm-only').forEach(b=>b.classList.toggle('show', prov==='google'));
+  document.getElementById('gm-scoring').classList.toggle('show', prov==='google');
   if (prov==='osrm' && currentMode==='transit') setMode('car', document.querySelector('[data-mode="car"]'));
   const sub = document.getElementById('subtitle-txt');
   const foot = document.getElementById('footer-note');
@@ -502,17 +526,39 @@ function setMode(mode,btn){
   btn.classList.add('active');
 }
 
+// ─── PACING ───────────────────────────────────────────────────────────────────
+// Distanzia le richieste a uno stesso servizio, ovunque partano: chi chiama non
+// deve ricordarsi del limite. Nominatim ammette 1 richiesta/s; il geocoder JS di
+// Google risponde OVER_QUERY_LIMIT se lo si martella a raffica.
+const lastCallAt={};
+async function paceCall(key, minMs){
+  const wait = minMs - (Date.now() - (lastCallAt[key]||0));
+  if(wait>0) await new Promise(r=>setTimeout(r,wait));
+  lastCallAt[key]=Date.now();
+}
+
 // ─── GEOCODE (Nominatim) ──────────────────────────────────────────────────────
 async function geocodeNominatim(query) {
+  await paceCall('nominatim',1100);
   const url=`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&limit=1`;
-  const res=await fetch(url,{headers:{'Accept-Language':'it'}});
+  let res;
+  try{
+    res=await fetch(url,{headers:{'Accept-Language':'it'}});
+  }catch(e){
+    // Nominatim risponde 429 senza header CORS: il browser lo riporta come
+    // errore di rete generico, quindi qui va tradotto in qualcosa di leggibile
+    throw new Error('Nominatim non raggiungibile (probabile limite di richieste superato) — riprova tra qualche minuto o passa a Google Maps');
+  }
+  if(res.status===429) throw new Error('Nominatim ha superato il limite di richieste — attendi qualche minuto o passa a Google Maps');
+  if(!res.ok) throw new Error(`Nominatim ha risposto HTTP ${res.status}`);
   const data=await res.json();
   if(!data.length) throw new Error(`"${query}" non trovato`);
   return {lat:parseFloat(data[0].lat),lon:parseFloat(data[0].lon),display:data[0].display_name};
 }
 
 // Google Geocoding (usa SDK)
-function geocodeGoogle(address) {
+async function geocodeGoogle(address) {
+  await paceCall('gmGeocode',200);
   return new Promise((resolve,reject)=>{
     if(!gmSDKLoaded) { reject(new Error('SDK Google Maps non caricato')); return; }
     const gc = new google.maps.Geocoder();
@@ -527,6 +573,19 @@ function geocodeGoogle(address) {
 async function geocode(query){
   if(currentProvider==='google') return geocodeGoogle(query);
   return geocodeNominatim(query);
+}
+
+// La zona ottimale non usa alcun servizio Google: se il geocoder del provider
+// attivo è indisponibile o inciampa, Nominatim è un ripiego valido — molto meglio
+// che abortire un calcolo che il resto della pipeline saprebbe completare.
+async function geocodeResilient(query){
+  try{
+    return await geocode(query);
+  }catch(e){
+    if(currentProvider!=='google') throw e;
+    console.warn(`Geocoder Google non utilizzabile (${e.message}) — ripiego su Nominatim`);
+    return geocodeNominatim(query);
+  }
 }
 
 // ─── OSRM ─────────────────────────────────────────────────────────────────────
@@ -973,6 +1032,20 @@ function renderOptimalWeights(){
       <div class="weight-val" id="wv-${i}">${currentW}</div>`;
     container.appendChild(row);
   });
+  updateGmScoringCost(n);
+}
+
+// Il calcolo con Google si paga a elemento (origini × destinazioni): la stima
+// va mostrata prima di cliccare, non scoperta a fine mese sulla fattura.
+function updateGmScoringCost(n){
+  const el = document.getElementById('gm-scoring-cost');
+  if(!el) return;
+  if(!n){ el.textContent=''; return; }
+  const cand = GRID_STEPS.reduce((tot,s)=>tot+makeGrid(0,0,1,s).length,0);
+  const elements = cand*n + n;              // griglie + distanze finali
+  const perReq = Math.min(25, Math.floor(100/n));
+  const reqs = GRID_STEPS.reduce((tot,s)=>tot+Math.ceil(makeGrid(0,0,1,s).length/perReq),0) + 1;
+  el.textContent = `Costo: ~${elements} elementi Distance Matrix per calcolo (${reqs} richieste, ${cand} posizioni candidate × ${n} luoghi). Con OSRM è gratis.`;
 }
 
 function updateWeight(idx,val){
@@ -1056,17 +1129,54 @@ async function osrmTableScores(candidates, points, wNorm, onChunk){
   return scores;
 }
 
+// ── Score Google in blocco: Distance Matrix a blocchi ──────────────────────────
+// Stessa idea di /table, ma i limiti sono più stretti: max 25 origini, 25
+// destinazioni e 100 elementi per richiesta lato client. Si fattura a elemento,
+// quindi il numero di blocchi è anche il conto della spesa.
+function gmScoringEnabled(){
+  const c=document.getElementById('gm-scoring-chk');
+  return currentProvider==='google' && gmSDKLoaded && c && c.checked;
+}
+
+async function gmTableScores(candidates, points, wNorm, onChunk){
+  const maxOrigins = Math.min(25, Math.floor(100/points.length));
+  if(maxOrigins<1) throw new Error('troppi luoghi per una singola richiesta');
+  const scores=[];
+  const destLL = points.map(p=>new google.maps.LatLng(p.lat,p.lon));
+  for(let start=0; start<candidates.length; start+=maxOrigins){
+    const chunk = candidates.slice(start, start+maxOrigins);
+    const origLL = chunk.map(c=>new google.maps.LatLng(c.lat,c.lon));
+    const res = await gmDistanceMatrix(origLL, destLL, currentMode, null);
+    res.rows.forEach((row,i)=>{
+      let score=0;
+      for(let j=0;j<points.length;j++){
+        const el=row.elements[j];
+        // elemento non calcolabile (ZERO_RESULTS su trasporti, ecc.): linea d'aria
+        score += wNorm[j] * (el && el.status==='OK'
+          ? el.distance.value/1000
+          : haversine(chunk[i].lat,chunk[i].lon,points[j].lat,points[j].lon));
+      }
+      scores.push(score);
+    });
+    if(onChunk) onChunk(Math.min(start+maxOrigins,candidates.length), candidates.length);
+  }
+  return scores;
+}
+
 // ── Valuta una griglia e ritorna il candidato migliore ──
-// Via /table basta una richiesta; se il servizio non risponde si ripiega sulle
-// chiamate /route una per coppia (lento ma identico nei risultati).
+// Un blocco di richieste invece di una per coppia; se lo scorer scelto non
+// risponde si ripiega sulle chiamate /route una per coppia (lento ma equivalente).
 async function evaluateGrid(grid, points, wNorm, current, area, pctFrom, pctTo, label){
   let best={...current}, scores=null;
+  const useGm = gmScoringEnabled();
   try{
-    scores = await osrmTableScores(grid, points, wNorm, (done,tot)=>{
-      setOptimalProgress(area, pctFrom+(pctTo-pctFrom)*done/tot, `${label} — ${done}/${tot} candidati...`);
-    });
+    const onChunk=(done,tot)=>setOptimalProgress(area, pctFrom+(pctTo-pctFrom)*done/tot,
+      `${label} — ${done}/${tot} candidati${useGm?' (Google)':''}...`);
+    scores = useGm
+      ? await gmTableScores(grid, points, wNorm, onChunk)
+      : await osrmTableScores(grid, points, wNorm, onChunk);
   }catch(e){
-    console.warn('OSRM /table non disponibile, fallback su /route:', e.message);
+    console.warn(`Scoring in blocco non disponibile (${e.message}), fallback su /route`);
   }
   if(scores){
     scores.forEach((s,i)=>{ if(s<best.score) best={lat:grid[i].lat,lon:grid[i].lon,score:s}; });
@@ -1146,11 +1256,9 @@ async function calcOptimalZone(){
     const n=filled.length;
     const geocoded=[];
     for(let i=0;i<n;i++){
-      const g=await geocode(filled[i].address);
+      // il distanziamento tra richieste è gestito dai geocoder stessi (paceCall)
+      const g=await geocodeResilient(filled[i].address);
       geocoded.push(g);
-      // Nominatim ammette al massimo 1 richiesta al secondo: pausa solo tra una
-      // richiesta e la successiva, e solo se il geocoder in uso è il suo
-      if(i<n-1 && currentProvider!=='google') await new Promise(r=>setTimeout(r,1100));
       setOptimalProgress(area, Math.round((i+1)/n*10), `Geocoding ${i+1}/${n}...`);
     }
 
@@ -1169,19 +1277,19 @@ async function calcOptimalZone(){
 
     // ── FASE 3: Griglia grossolana (radius, 3 anelli) → trova la zona migliore ─
     setOptimalProgress(area, 15, `Griglia grossolana (raggio ~${searchRadius.toFixed(0)} km)...`);
-    const coarseGrid = makeGrid(aerial.lat, aerial.lon, searchRadius, 3);
+    const coarseGrid = makeGrid(aerial.lat, aerial.lon, searchRadius, GRID_STEPS[0]);
     const coarseBest = await evaluateGrid(coarseGrid, geocoded, wNorm,
       {lat:aerial.lat, lon:aerial.lon, score:Infinity}, area, 15, 50, 'Griglia grossolana');
 
     // ── FASE 4: Griglia fine attorno al miglior candidato grossolano ───────────
     const fineRadius = searchRadius * 0.35;
-    const fineGrid = makeGrid(coarseBest.lat, coarseBest.lon, fineRadius, 3);
+    const fineGrid = makeGrid(coarseBest.lat, coarseBest.lon, fineRadius, GRID_STEPS[1]);
     const fineBest = await evaluateGrid(fineGrid, geocoded, wNorm,
       coarseBest, area, 50, 80, 'Griglia fine');
 
     // ── FASE 5: Griglia ultrafine attorno al miglior candidato fine ────────────
     const ultraRadius = fineRadius * 0.4;
-    const ultraGrid = makeGrid(fineBest.lat, fineBest.lon, ultraRadius, 2);
+    const ultraGrid = makeGrid(fineBest.lat, fineBest.lon, ultraRadius, GRID_STEPS[2]);
     const best = await evaluateGrid(ultraGrid, geocoded, wNorm,
       fineBest, area, 80, 90, 'Rifinitura zona');
 
@@ -1203,10 +1311,26 @@ async function calcOptimalZone(){
       setOptimalProgress(area, 91+Math.round((i+1)/n*6), `Distanze stradali ${i+1}/${n}...`);
     }
 
+    // Con lo scoring Google i numeri mostrati devono venire dalla stessa fonte
+    // dello score, o la somma non torna col punteggio. Le geometrie per la mappa
+    // restano OSRM: Distance Matrix non le fornisce.
+    if(gmScoringEnabled()){
+      try{
+        const res=await gmDistanceMatrix(
+          [new google.maps.LatLng(best.lat,best.lon)],
+          geocoded.map(g=>new google.maps.LatLng(g.lat,g.lon)), currentMode, null);
+        res.rows[0].elements.forEach((el,i)=>{
+          if(el && el.status==='OK')
+            roadDists[i]={km:+(el.distance.value/1000).toFixed(1), min:Math.round(el.duration.value/60)};
+        });
+      }catch(e){ console.warn('Distanze finali Google non disponibili:', e.message); }
+    }
+
     // ── FASE 7: Reverse geocoding ──────────────────────────────────────────────
     setOptimalProgress(area, 98, 'Reverse geocoding del punto ottimale...');
     let bestAddress = `${best.lat.toFixed(5)}, ${best.lon.toFixed(5)}`;
     try{
+      await paceCall('nominatim',1100);
       const rev=await fetch(`https://nominatim.openstreetmap.org/reverse?lat=${best.lat}&lon=${best.lon}&format=json`,{headers:{'Accept-Language':'it'}});
       const revData=await rev.json();
       if(revData.display_name) bestAddress=revData.display_name;

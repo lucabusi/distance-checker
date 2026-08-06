@@ -52,3 +52,7 @@ Senza questo file la pagina funziona normalmente.
 - Costruito con [Leaflet](https://leafletjs.com/) e le API pubbliche di [OSRM](https://project-osrm.org/) e [Nominatim](https://nominatim.org/), soggette a rate limit: il calcolo della zona ottimale fa molte richieste ed è volutamente lento.
 - I tempi OSRM non tengono conto del traffico.
 - Interfaccia in italiano.
+
+## Licenza
+
+[MIT](LICENSE) © 2026 Luca Busi

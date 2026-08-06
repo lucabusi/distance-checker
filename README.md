@@ -54,7 +54,7 @@ Senza questo file la pagina funziona normalmente.
 
 ## Note
 
-- Costruito con [Leaflet](https://leafletjs.com/) e le API pubbliche di [OSRM](https://project-osrm.org/) e [Nominatim](https://nominatim.org/), soggette a rate limit: il calcolo della zona ottimale fa molte richieste ed è volutamente lento.
+- Costruito con [Leaflet](https://leafletjs.com/) e le API pubbliche di [OSRM](https://project-osrm.org/) e [Nominatim](https://nominatim.org/). Il calcolo della zona ottimale valuta ~120 posizioni candidate ma usa il servizio `/table` di OSRM, che restituisce un'intera matrice di distanze per richiesta: con 5 luoghi bastano una quindicina di richieste in tutto, e il risultato arriva in pochi secondi.
 - I tempi OSRM non tengono conto del traffico.
 - Interfaccia in italiano.
 

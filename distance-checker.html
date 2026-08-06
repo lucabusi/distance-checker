@@ -1023,7 +1023,66 @@ function gradientDescent(points, weights){
   return {lat,lon,score:weightedScore(lat,lon,points,weights)};
 }
 
+// ── Score OSRM in blocco: UNA richiesta /table per l'intera griglia di candidati ──
+// Ritorna un array di score (km ponderati) nello stesso ordine dei candidati.
+// Il demo server regge ~300 coordinate per richiesta; oltre le ~500 l'URL viene
+// rifiutato con HTTP 414, quindi si spezza in blocchi ampiamente sotto la soglia.
+const TABLE_CHUNK = 80;
+async function osrmTableScores(candidates, points, wNorm, onChunk){
+  const profile = currentMode==='transit'?'car':currentMode;
+  const scores = [];
+  for(let start=0; start<candidates.length; start+=TABLE_CHUNK){
+    const chunk = candidates.slice(start, start+TABLE_CHUNK);
+    const coords = [...chunk,...points].map(p=>`${p.lon},${p.lat}`).join(';');
+    const src = chunk.map((_,i)=>i).join(';');
+    const dst = points.map((_,j)=>chunk.length+j).join(';');
+    const url = `https://router.project-osrm.org/table/v1/${profile}/${coords}?sources=${src}&destinations=${dst}&annotations=distance`;
+    const res = await fetch(url);
+    if(!res.ok) throw new Error(`table HTTP ${res.status}`);
+    const data = await res.json();
+    if(data.code!=='Ok'||!data.distances) throw new Error(`table: ${data.code}`);
+    data.distances.forEach((row,i)=>{
+      let score=0;
+      for(let j=0;j<points.length;j++){
+        // null = coppia non raggiungibile: stessa linea d'aria usata dal fallback /route
+        const m=row[j];
+        score += wNorm[j] * (m==null ? haversine(chunk[i].lat,chunk[i].lon,points[j].lat,points[j].lon) : m/1000);
+      }
+      scores.push(score);
+    });
+    if(onChunk) onChunk(Math.min(start+TABLE_CHUNK,candidates.length), candidates.length);
+    if(start+TABLE_CHUNK < candidates.length) await new Promise(r=>setTimeout(r,300));
+  }
+  return scores;
+}
+
+// ── Valuta una griglia e ritorna il candidato migliore ──
+// Via /table basta una richiesta; se il servizio non risponde si ripiega sulle
+// chiamate /route una per coppia (lento ma identico nei risultati).
+async function evaluateGrid(grid, points, wNorm, current, area, pctFrom, pctTo, label){
+  let best={...current}, scores=null;
+  try{
+    scores = await osrmTableScores(grid, points, wNorm, (done,tot)=>{
+      setOptimalProgress(area, pctFrom+(pctTo-pctFrom)*done/tot, `${label} — ${done}/${tot} candidati...`);
+    });
+  }catch(e){
+    console.warn('OSRM /table non disponibile, fallback su /route:', e.message);
+  }
+  if(scores){
+    scores.forEach((s,i)=>{ if(s<best.score) best={lat:grid[i].lat,lon:grid[i].lon,score:s}; });
+    setOptimalProgress(area, pctTo, `${label} — score migliore: ${best.score.toFixed(1)} km`);
+  }else{
+    for(let i=0;i<grid.length;i++){
+      const s=await osrmWeightedScore(grid[i].lat,grid[i].lon,points,wNorm,120);
+      if(s<best.score) best={lat:grid[i].lat,lon:grid[i].lon,score:s};
+      setOptimalProgress(area, pctFrom+(pctTo-pctFrom)*(i+1)/grid.length, `${label} — candidato ${i+1}/${grid.length} (score migliore: ${best.score.toFixed(1)} km)`);
+    }
+  }
+  return best;
+}
+
 // ── Score OSRM: somma ponderata distanze stradali da un candidato a tutti i punti ──
+// Usato solo come fallback quando /table non è disponibile.
 async function osrmWeightedScore(candLat, candLon, points, wNorm, delayMs=150){
   let score=0;
   for(let i=0;i<points.length;i++){
@@ -1089,7 +1148,9 @@ async function calcOptimalZone(){
     for(let i=0;i<n;i++){
       const g=await geocode(filled[i].address);
       geocoded.push(g);
-      await new Promise(r=>setTimeout(r,350));
+      // Nominatim ammette al massimo 1 richiesta al secondo: pausa solo tra una
+      // richiesta e la successiva, e solo se il geocoder in uso è il suo
+      if(i<n-1 && currentProvider!=='google') await new Promise(r=>setTimeout(r,1100));
       setOptimalProgress(area, Math.round((i+1)/n*10), `Geocoding ${i+1}/${n}...`);
     }
 
@@ -1109,44 +1170,20 @@ async function calcOptimalZone(){
     // ── FASE 3: Griglia grossolana (radius, 3 anelli) → trova la zona migliore ─
     setOptimalProgress(area, 15, `Griglia grossolana (raggio ~${searchRadius.toFixed(0)} km)...`);
     const coarseGrid = makeGrid(aerial.lat, aerial.lon, searchRadius, 3);
-    const totalCoarse = coarseGrid.length;
-    let coarseBest = {lat:aerial.lat, lon:aerial.lon, score:Infinity};
-
-    for(let ci=0;ci<coarseGrid.length;ci++){
-      const c=coarseGrid[ci];
-      const s=await osrmWeightedScore(c.lat,c.lon,geocoded,wNorm,120);
-      if(s<coarseBest.score) coarseBest={lat:c.lat,lon:c.lon,score:s};
-      const pct=15 + Math.round((ci+1)/totalCoarse*35);
-      setOptimalProgress(area, pct, `Griglia grossolana — candidato ${ci+1}/${totalCoarse} (score migliore: ${coarseBest.score.toFixed(1)} km)`);
-    }
+    const coarseBest = await evaluateGrid(coarseGrid, geocoded, wNorm,
+      {lat:aerial.lat, lon:aerial.lon, score:Infinity}, area, 15, 50, 'Griglia grossolana');
 
     // ── FASE 4: Griglia fine attorno al miglior candidato grossolano ───────────
     const fineRadius = searchRadius * 0.35;
     const fineGrid = makeGrid(coarseBest.lat, coarseBest.lon, fineRadius, 3);
-    const totalFine = fineGrid.length;
-    let fineBest = {...coarseBest};
-
-    for(let fi=0;fi<fineGrid.length;fi++){
-      const c=fineGrid[fi];
-      const s=await osrmWeightedScore(c.lat,c.lon,geocoded,wNorm,120);
-      if(s<fineBest.score) fineBest={lat:c.lat,lon:c.lon,score:s};
-      const pct=50 + Math.round((fi+1)/totalFine*30);
-      setOptimalProgress(area, pct, `Griglia fine — candidato ${fi+1}/${totalFine} (score migliore: ${fineBest.score.toFixed(1)} km)`);
-    }
+    const fineBest = await evaluateGrid(fineGrid, geocoded, wNorm,
+      coarseBest, area, 50, 80, 'Griglia fine');
 
     // ── FASE 5: Griglia ultrafine attorno al miglior candidato fine ────────────
     const ultraRadius = fineRadius * 0.4;
     const ultraGrid = makeGrid(fineBest.lat, fineBest.lon, ultraRadius, 2);
-    const totalUltra = ultraGrid.length;
-    let best = {...fineBest};
-
-    for(let ui=0;ui<ultraGrid.length;ui++){
-      const c=ultraGrid[ui];
-      const s=await osrmWeightedScore(c.lat,c.lon,geocoded,wNorm,100);
-      if(s<best.score) best={lat:c.lat,lon:c.lon,score:s};
-      const pct=80 + Math.round((ui+1)/totalUltra*10);
-      setOptimalProgress(area, pct, `Rifinitura zona — candidato ${ui+1}/${totalUltra}...`);
-    }
+    const best = await evaluateGrid(ultraGrid, geocoded, wNorm,
+      fineBest, area, 80, 90, 'Rifinitura zona');
 
     // ── FASE 6: Distanze finali dal punto ottimale a ciascun luogo ────────────
     setOptimalProgress(area, 91, 'Calcolo distanze stradali finali...');

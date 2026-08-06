@@ -1065,7 +1065,7 @@ function updateGmScoringCost(n){
   const elements = cand*n;   // le distanze finali sono già nella matrice dell'ultima passata
   const perReq = Math.min(25, Math.floor(100/n));
   const reqs = GRID_STEPS.reduce((tot,s)=>tot+Math.ceil(makeGrid(0,0,1,s).length/perReq),0);
-  el.textContent = `Costo: ~${elements} elementi Distance Matrix per calcolo (${reqs} richieste, ${cand} posizioni candidate × ${n} luoghi). Con OSRM è gratis.`;
+  el.textContent = `Costo: ~${elements} elementi Distance Matrix per calcolo (${reqs} richieste, ${cand} posizioni candidate × ${n} luoghi). Con OSRM è gratis e MOLTO piu veloce.`;
 }
 
 function updateWeight(idx,val){

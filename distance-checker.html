@@ -678,15 +678,17 @@ async function geocode(query){
   return geocodeNominatim(query);
 }
 
-// La zona ottimale non usa alcun servizio Google: se il geocoder del provider
-// attivo è indisponibile o inciampa, Nominatim è un ripiego valido — molto meglio
-// che abortire un calcolo che il resto della pipeline saprebbe completare.
+// Se il geocoder Google è indisponibile (tipicamente REQUEST_DENIED: Geocoding
+// API non abilitata o non consentita dalla key), Nominatim è un ripiego valido:
+// distanze e percorsi Google lavorano su coordinate, quindi il calcolo si completa
+// lo stesso — molto meglio che abortirlo. L'avviso resta visibile nel pannello.
 async function geocodeResilient(query){
   try{
     return await geocode(query);
   }catch(e){
     if(currentProvider!=='google') throw e;
     console.warn(`Geocoder Google non utilizzabile (${e.message}) — ripiego su Nominatim`);
+    setKeyStatus('warn',`⚠ ${e.message} · Indirizzi geocodificati con Nominatim (OpenStreetMap) al suo posto.`);
     return geocodeNominatim(query);
   }
 }
@@ -816,7 +818,7 @@ async function calculate(){
 
   // Geocode origine
   let orig;
-  try{orig=await geocode(originVal);}
+  try{orig=await geocodeResilient(originVal);}
   catch(e){btn.disabled=false;btn.textContent='Calcola →';alert(`Partenza: ${e.message}`);return;}
 
   for(let i=0;i<filled.length;i++){
@@ -825,7 +827,7 @@ async function calculate(){
     const addrEl=document.getElementById(`addr-${i}`);
     const bodyEl=document.getElementById(`body-${i}`);
     try{
-      const dest=await geocode(p.address);
+      const dest=await geocodeResilient(p.address);
       addrEl.textContent=trunc(dest.display,72);
       if(currentProvider==='osrm'){
         await renderOSRM(i,orig,dest,bodyEl);

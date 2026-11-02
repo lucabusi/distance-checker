@@ -350,7 +350,7 @@ input[type="text"]::placeholder{color:var(--muted);}
   </div>
   <div class="key-status" id="key-status"></div>
   <p class="gm-note">
-    Serve una key con <strong style="color:var(--text)">Maps JavaScript API</strong> e <strong style="color:var(--text)">Distance Matrix API</strong> abilitate.<br>
+    Serve una key con <strong style="color:var(--text)">Maps JavaScript API</strong>, <strong style="color:var(--text)">Geocoding API</strong>, <strong style="color:var(--text)">Distance Matrix API</strong> e <strong style="color:var(--text)">Directions API</strong> abilitate.<br>
     Ottienila su <a href="https://console.cloud.google.com/" target="_blank">Google Cloud Console</a> · La key viene salvata solo localmente nel browser.<br>
     ⚠ Per usare Maps JS API nel browser, assicurati di aver autorizzato il dominio (o <code style="color:var(--accent)">localhost</code> / <code style="color:var(--accent)">file://</code>) nelle restrizioni HTTP della key.
   </p>
@@ -660,6 +660,12 @@ async function geocodeGoogle(address) {
     if(!gmSDKLoaded) { reject(new Error('SDK Google Maps non caricato')); return; }
     const gc = new google.maps.Geocoder();
     gc.geocode({address, region:'it'},(results,status)=>{
+      if(status==='REQUEST_DENIED'){
+        reject(new Error('Geocoding: REQUEST_DENIED — la key non è autorizzata per la Geocoding API. '
+          +'Abilitala nel progetto Google Cloud (API e servizi → Libreria → Geocoding API) '
+          +'e, se la key ha restrizioni sulle API, aggiungila all\'elenco delle API consentite.'));
+        return;
+      }
       if(status!=='OK'||!results.length){reject(new Error(`Geocoding: ${status}`));return;}
       const loc=results[0].geometry.location;
       resolve({lat:loc.lat(),lon:loc.lng(),display:results[0].formatted_address});

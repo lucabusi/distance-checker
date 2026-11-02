@@ -350,7 +350,7 @@ input[type="text"]::placeholder{color:var(--muted);}
   </div>
   <div class="key-status" id="key-status"></div>
   <p class="gm-note">
-    Serve una key con <strong style="color:var(--text)">Maps JavaScript API</strong>, <strong style="color:var(--text)">Geocoding API</strong>, <strong style="color:var(--text)">Distance Matrix API</strong> e <strong style="color:var(--text)">Directions API</strong> abilitate.<br>
+    Serve una key con <strong style="color:var(--text)">Maps JavaScript API</strong>, <strong style="color:var(--text)">Geocoding API</strong> e <strong style="color:var(--text)">Routes API</strong> abilitate.<br>
     Ottienila su <a href="https://console.cloud.google.com/" target="_blank">Google Cloud Console</a> · La key viene salvata solo localmente nel browser.<br>
     ⚠ Per usare Maps JS API nel browser, assicurati di aver autorizzato il dominio (o <code style="color:var(--accent)">localhost</code> / <code style="color:var(--accent)">file://</code>) nelle restrizioni HTTP della key.
   </p>
@@ -501,8 +501,8 @@ function setProvider(prov, btn) {
   const foot = document.getElementById('footer-note');
   const hint = document.getElementById('geocode-hint');
   if (prov==='google') {
-    sub.textContent='// Google Maps JS API · Distance Matrix · fasce orarie';
-    foot.innerHTML='Dati di routing via <strong style="color:var(--text)">Google Maps Distance Matrix API</strong><br>I tempi per fascia oraria usano dati storici del traffico (prossimo lunedì).';
+    sub.textContent='// Google Maps JS API · Routes API · fasce orarie';
+    foot.innerHTML='Dati di routing via <strong style="color:var(--text)">Google Maps Routes API</strong><br>I tempi per fascia oraria usano dati storici del traffico (prossimo lunedì).';
     hint.textContent='Indirizzo · geocodificato tramite Google Geocoding (richiede SDK caricato)';
   } else {
     sub.innerHTML='// OSRM routing · OpenStreetMap · andata &amp; ritorno';
@@ -701,37 +701,62 @@ async function getRouteOSRM(from,to,profile){
   return{distance_km:(r.distance/1000).toFixed(1),duration_min:Math.round(r.duration/60),geometry:r.geometry.coordinates};
 }
 
-// ─── GOOGLE DISTANCE MATRIX ───────────────────────────────────────────────────
-// Usa le Google Maps JS API (nessun CORS, gira nel browser)
-function gmDistanceMatrix(origins, destinations, mode, departureTime) {
-  return new Promise((resolve,reject)=>{
-    if(!gmSDKLoaded){reject(new Error('SDK Google Maps non caricato'));return;}
-    const gmMode={car:'DRIVING',bike:'BICYCLING',foot:'WALKING',transit:'TRANSIT'}[mode];
-    const svc=new google.maps.DistanceMatrixService();
-    const req={
-      origins,
-      destinations,
-      travelMode:google.maps.TravelMode[gmMode],
-      unitSystem:google.maps.UnitSystem.METRIC,
-      avoidHighways:false,
-      avoidTolls:false,
-    };
-    if(departureTime && (mode==='car'||mode==='transit')){
-      req.drivingOptions={departureTime:new Date(departureTime*1000),trafficModel:google.maps.TrafficModel.BEST_GUESS};
-    }
-    svc.getDistanceMatrix(req,(res,status)=>{
-      if(status!=='OK'){reject(new Error(`DistanceMatrix: ${status}`));return;}
-      resolve(res);
-    });
-  });
+// ─── GOOGLE ROUTE MATRIX ──────────────────────────────────────────────────────
+// Distance Matrix e Directions sono "legacy" dal 1° marzo 2025 e non si possono
+// più abilitare sui progetti nuovi: si usa la libreria "routes" delle Maps JS
+// API (RouteMatrix / Route), servita dalla Routes API. Gira nel browser, niente CORS.
+const GM_TRAVEL_MODE={car:'DRIVING',bike:'BICYCLING',foot:'WALKING',transit:'TRANSIT'};
+let gmRoutesLib=null;
+async function gmRoutes(){
+  if(!gmSDKLoaded) throw new Error('SDK Google Maps non caricato');
+  if(!gmRoutesLib) gmRoutesLib=await google.maps.importLibrary('routes');
+  return gmRoutesLib;
+}
+
+// Gli errori della Routes API arrivano come eccezioni con un messaggio tecnico:
+// il caso tipico (API non abilitata o non consentita dalla key) va spiegato.
+function gmRoutesError(e, what){
+  const msg=e?.message||String(e);
+  if(/PERMISSION_DENIED|REQUEST_DENIED|not been used|is disabled|not authorized|API_KEY/i.test(msg))
+    return new Error(`${what}: la key non è autorizzata per la Routes API — abilitala nel progetto Google Cloud `
+      +`(API e servizi → Libreria → Routes API) e, se la key ha restrizioni sulle API, aggiungila all'elenco. (${msg})`);
+  return new Error(`${what}: ${msg}`);
+}
+
+// Ritorna {rows:[{elements:[RouteMatrixItem,...]}]}: righe = origini, colonne = destinazioni.
+// departureTime (secondi epoch) attiva il traffico previsto: per l'auto serve
+// TRAFFIC_AWARE_OPTIMAL, per i mezzi pubblici basta l'orario di partenza.
+async function gmDistanceMatrix(origins, destinations, mode, departureTime) {
+  const {RouteMatrix}=await gmRoutes();
+  const req={
+    origins,
+    destinations,
+    travelMode:GM_TRAVEL_MODE[mode],
+    fields:['condition','distanceMeters','durationMillis'],
+  };
+  if(departureTime && (mode==='car'||mode==='transit')){
+    req.departureTime=new Date(departureTime*1000);
+    if(mode==='car'){ req.routingPreference='TRAFFIC_AWARE_OPTIMAL'; req.trafficModel='BEST_GUESS'; }
+  }
+  let matrix;
+  try{ ({matrix}=await RouteMatrix.computeRouteMatrix(req)); }
+  catch(e){ throw gmRoutesError(e,'RouteMatrix'); }
+  return {rows:matrix.rows.map(r=>({elements:r.items}))};
+}
+
+// Un elemento è valido se la Routes API ha trovato il percorso. distanceMeters
+// può mancare quando vale 0 (campo omesso dal protocollo), quindi ?? 0.
+function gmItemOk(el){
+  return !!el && !el.error && el.condition!=='ROUTE_NOT_FOUND'
+    && (el.condition==='ROUTE_EXISTS' || el.distanceMeters!=null);
 }
 
 function parseMatrixElement(el){
-  if(!el||el.status!=='OK') throw new Error('Elemento non disponibile');
+  if(!gmItemOk(el)) throw new Error('Elemento non disponibile');
   return{
-    distance_km:(el.distance.value/1000).toFixed(1),
-    duration_min:Math.round(el.duration.value/60),
-    duration_traffic_min:el.duration_in_traffic?Math.round(el.duration_in_traffic.value/60):null,
+    distance_km:((el.distanceMeters??0)/1000).toFixed(1),
+    duration_min:Math.round((el.durationMillis??0)/60000),
+    duration_traffic_min:null,
   };
 }
 
@@ -856,7 +881,7 @@ async function renderOSRM(i,orig,dest,bodyEl){
 
 // ─── RENDER GOOGLE ────────────────────────────────────────────────────────────
 async function renderGoogle(i,orig,dest,bodyEl){
-  bodyEl.innerHTML=`<div class="loading-body"><span class="spinner"></span> Distance Matrix andata/ritorno...</div>`;
+  bodyEl.innerHTML=`<div class="loading-body"><span class="spinner"></span> Route Matrix andata/ritorno...</div>`;
 
   const origLL=new google.maps.LatLng(orig.lat,orig.lon);
   const destLL=new google.maps.LatLng(dest.lat,dest.lon);
@@ -868,7 +893,7 @@ async function renderGoogle(i,orig,dest,bodyEl){
   const diff=Math.abs(fwdBase.duration_min-bwdBase.duration_min);
   const note=diff>0?`↕ ${diff} min di differenza`:'Stessa durata nei due sensi';
 
-  // Ottieni andata e ritorno in parallelo tramite Directions API JS SDK (no CORS)
+  // Geometrie di andata e ritorno in parallelo tramite Route.computeRoutes (no CORS)
   let dirFwd=null, dirBwd=null;
   try{
     [dirFwd, dirBwd] = await Promise.all([
@@ -957,14 +982,19 @@ async function loadBands(cardIdx,origLL,destLL,baseMin){
   }
 }
 
-// Directions API via JS SDK (no CORS)
-function getDirectionsResult(origLL,destLL,mode){
-  return new Promise((resolve,reject)=>{
-    const svc=new google.maps.DirectionsService();
-    const gmMode={car:'DRIVING',bike:'BICYCLING',foot:'WALKING',transit:'TRANSIT'}[mode];
-    svc.route({origin:origLL,destination:destLL,travelMode:google.maps.TravelMode[gmMode]},
-      (result,status)=>{ if(status==='OK') resolve(result); else reject(new Error(`Directions: ${status}`)); });
-  });
+// Percorso per la mappa via Route.computeRoutes (Routes API): ritorna la Route
+async function getDirectionsResult(origLL,destLL,mode){
+  const {Route}=await gmRoutes();
+  let routes;
+  try{
+    ({routes}=await Route.computeRoutes({
+      origin:origLL, destination:destLL,
+      travelMode:GM_TRAVEL_MODE[mode],
+      fields:['path','viewport'],
+    }));
+  }catch(e){ throw gmRoutesError(e,'Route'); }
+  if(!routes||!routes.length||!routes[0].path) throw new Error('Route: percorso non trovato');
+  return routes[0];
 }
 
 // Costruisce la mappa Google con percorso disegnato (dark style)
@@ -1001,28 +1031,22 @@ function buildGoogleMap(i){
     fullscreenControl:false,
   });
 
+  const pathOf=r=>r.path.map(p=>({lat:p.lat,lng:p.lng}));
+
   // Andata: nero pieno
   if(d.dirFwd){
-    new google.maps.DirectionsRenderer({
-      map,
-      directions:d.dirFwd,
-      suppressMarkers:true,   // marker custom sotto
-      preserveViewport:true,
-      polylineOptions:{strokeColor:'#1a1a1a',strokeWeight:5,strokeOpacity:.9},
+    new google.maps.Polyline({
+      map, path:pathOf(d.dirFwd),
+      strokeColor:'#1a1a1a',strokeWeight:5,strokeOpacity:.9,
     });
   }
 
   // Ritorno: ambra tratteggiata (solo se diverso dall'andata)
   if(d.dirBwd && !d.sameRoute){
-    new google.maps.DirectionsRenderer({
-      map,
-      directions:d.dirBwd,
-      suppressMarkers:true,
-      preserveViewport:true,
-      polylineOptions:{strokeColor:'#b07a10',strokeWeight:3,strokeOpacity:.8,icons:[{
-        icon:{path:'M 0,-1 0,1',strokeOpacity:1,scale:3},
-        offset:'0',repeat:'12px'
-      }]},
+    new google.maps.Polyline({
+      map, path:pathOf(d.dirBwd),
+      strokeColor:'#b07a10',strokeOpacity:0,strokeWeight:3,
+      icons:[{icon:{path:'M 0,-1 0,1',strokeOpacity:.8,scale:3},offset:'0',repeat:'12px'}],
     });
   }
 
@@ -1050,8 +1074,10 @@ function buildGoogleMap(i){
 
   // Fit bounds su entrambi i percorsi
   const bounds=new google.maps.LatLngBounds();
-  if(d.dirFwd) d.dirFwd.routes[0].overview_path.forEach(p=>bounds.extend(p));
-  if(d.dirBwd && !d.sameRoute) d.dirBwd.routes[0].overview_path.forEach(p=>bounds.extend(p));
+  bounds.extend({lat:d.orig.lat,lng:d.orig.lon});
+  bounds.extend({lat:d.dest.lat,lng:d.dest.lon});
+  if(d.dirFwd) pathOf(d.dirFwd).forEach(p=>bounds.extend(p));
+  if(d.dirBwd && !d.sameRoute) pathOf(d.dirBwd).forEach(p=>bounds.extend(p));
   map.fitBounds(bounds,{top:24,right:24,bottom:24,left:24});
 
   d.instance=map;
@@ -1149,7 +1175,7 @@ function updateGmScoringCost(n){
   const elements = cand*n;   // le distanze finali sono già nella matrice dell'ultima passata
   const perReq = Math.min(25, Math.floor(100/n));
   const reqs = GRID_STEPS.reduce((tot,s)=>tot+Math.ceil(makeGrid(0,0,1,s).length/perReq),0);
-  el.textContent = `Costo: ~${elements} elementi Distance Matrix per calcolo (${reqs} richieste, ${cand} posizioni candidate × ${n} luoghi). Con OSRM è gratis e MOLTO piu veloce.`;
+  el.textContent = `Costo: ~${elements} elementi Route Matrix per calcolo (${reqs} richieste, ${cand} posizioni candidate × ${n} luoghi). Con OSRM è gratis e MOLTO piu veloce.`;
 }
 
 function updateWeight(idx,val){
@@ -1235,7 +1261,7 @@ async function osrmTableScores(candidates, points, wNorm, onChunk){
   return {scores, dists:null};
 }
 
-// ── Score Google in blocco: Distance Matrix a blocchi ──────────────────────────
+// ── Score Google in blocco: Route Matrix a blocchi ─────────────────────────────
 // Stessa idea di /table, ma i limiti sono più stretti: max 25 origini, 25
 // destinazioni e 100 elementi per richiesta lato client. Si fattura a elemento,
 // quindi il numero di blocchi è anche il conto della spesa.
@@ -1275,10 +1301,10 @@ async function gmTableScores(candidates, points, wNorm, onChunk){
       for(let j=0;j<points.length;j++){
         const el=row.elements[j];
         // elemento non calcolabile (ZERO_RESULTS su trasporti, ecc.): linea d'aria
-        const ok = el && el.status==='OK';
-        const km = ok ? el.distance.value/1000
+        const ok = gmItemOk(el);
+        const km = ok ? (el.distanceMeters??0)/1000
                       : haversine(chunk[i].lat,chunk[i].lon,points[j].lat,points[j].lon);
-        row_.push({km:+km.toFixed(1), min: ok ? Math.round(el.duration.value/60) : null});
+        row_.push({km:+km.toFixed(1), min: ok ? Math.round((el.durationMillis??0)/60000) : null});
         score += wNorm[j]*km;
       }
       scores.push(score); dists.push(row_);
@@ -1455,7 +1481,7 @@ async function calcOptimalZone(){
     // dello score, o la somma non torna col punteggio. Sono già stati calcolati
     // nell'ultima passata: quelli del vincitore sono la sua riga della matrice,
     // quindi non serve richiederli. Le geometrie per la mappa restano OSRM,
-    // perché Distance Matrix non le fornisce.
+    // perché la Route Matrix non le fornisce.
     if(gmScoringEnabled() && best.dists)
       best.dists.forEach((d,i)=>{ roadDists[i]=d; });
 

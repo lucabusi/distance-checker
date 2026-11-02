@@ -22,7 +22,7 @@ Nessun build, nessuna installazione, nessun backend: un solo file da aprire nel 
 
 | | OpenStreetMap / OSRM | Google Maps |
 |---|---|---|
-| API key | non serve | richiesta |
+| API key | opzionale (CARTO, solo per lo sfondo mappe) | richiesta |
 | Costo | gratuito | a consumo |
 | Geocoding | Nominatim | Google Geocoding |
 | Traffico per fascia oraria | ✕ | ✓ |
@@ -33,6 +33,8 @@ Si passa dall'una all'altra con un click. La zona ottimale usa sempre OSRM.
 ## Uso
 
 Scarica il repository e apri `distance-checker.html` nel browser. È tutto.
+
+Lo sfondo delle mappe Leaflet (percorsi OSRM e zona ottimale) viene da CARTO, che da fine 2026 richiede una API key gratuita: richiedila su [carto.com/basemaps/apikey](https://carto.com/basemaps/apikey) (non serve un account) e incollala nel pannello **CARTO Basemaps API Key**. Anche questa resta salvata solo nel browser. Senza key le mappe usano le tile standard di OpenStreetMap, che richiedono un Referer valido: aprendo la pagina da `file://` possono non caricarsi, quindi in quel caso servi la pagina da un web server locale (vedi sotto).
 
 Per usare Google Maps serve una API key con **Maps JavaScript API** e **Distance Matrix API** abilitate, da incollare nel pannello dedicato (resta salvata solo nel browser, in `localStorage`). Le key con restrizione per referrer HTTP non funzionano da `file://`: servire la pagina da un web server locale, per esempio
 

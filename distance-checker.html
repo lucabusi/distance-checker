@@ -65,6 +65,7 @@ h1 span{color:var(--accent-pop);}
 .gm-panel{background:var(--surface);border:1.5px solid var(--border-strong);border-radius:var(--radius);
   padding:20px 22px;margin-bottom:28px;display:none;}
 .gm-panel.visible{display:block;}
+.gm-panel.always{display:block;}
 .gm-panel-title{font-family:'DM Mono',monospace;font-size:.68rem;color:var(--text);
   letter-spacing:.1em;text-transform:uppercase;margin-bottom:12px;font-weight:500;}
 .gm-key-row{display:flex;gap:8px;align-items:center;}
@@ -316,12 +317,28 @@ input[type="text"]::placeholder{color:var(--muted);}
 <div class="provider-bar">
   <button class="prov-btn active" id="prov-osrm" onclick="setProvider('osrm',this)">
     <span class="prov-icon">🗺</span>OpenStreetMap / OSRM
-    <span class="prov-sub">gratuito · no API key</span>
+    <span class="prov-sub">gratuito · key CARTO opzionale per le mappe</span>
   </button>
   <button class="prov-btn" id="prov-gm" onclick="setProvider('google',this)">
     <span class="prov-icon">🌐</span>Google Maps
     <span class="prov-sub">traffico per fascia oraria · richiede API key</span>
   </button>
+</div>
+
+<!-- CARTO PANEL -->
+<div class="gm-panel always" id="carto-panel">
+  <div class="gm-panel-title">🔑 CARTO Basemaps API Key</div>
+  <div class="gm-key-row">
+    <input type="text" id="carto-key-input" placeholder="API key CARTO" autocomplete="off" spellcheck="false"/>
+    <button class="btn-load-gm" onclick="saveCartoKey()">Salva</button>
+  </div>
+  <div class="key-status" id="carto-key-status"></div>
+  <p class="gm-note">
+    Serve per lo sfondo delle mappe Leaflet (percorsi OSRM e zona ottimale). La key è gratuita, non richiede account:
+    richiedila su <a href="https://carto.com/basemaps/apikey" target="_blank">carto.com/basemaps</a> · La key viene salvata solo localmente nel browser.<br>
+    Senza key le mappe usano le tile standard di OpenStreetMap, che possono non caricarsi aprendo la pagina da <code style="color:var(--accent)">file://</code>:
+    in quel caso servi la pagina da un web server locale.
+  </p>
 </div>
 
 <!-- GOOGLE PANEL -->
@@ -396,7 +413,7 @@ input[type="text"]::placeholder{color:var(--muted);}
 <div class="results-grid" id="results-grid"></div>
 
 <div class="footer-note" id="footer-note">
-  Routing via <strong style="color:var(--text)">OSRM</strong> · Mappe <strong style="color:var(--text)">OpenStreetMap / CartoDB</strong><br>
+  Routing via <strong style="color:var(--text)">OSRM</strong> · Mappe <strong style="color:var(--text)">OpenStreetMap / CARTO</strong><br>
   Tempi stimati senza traffico live · <span style="color:var(--accent)">━━</span> andata &nbsp;|&nbsp; <span style="color:var(--accent2)">╌╌</span> ritorno
 </div>
 </div>
@@ -413,6 +430,7 @@ let places = [
 let currentMode = 'car';
 let currentProvider = 'osrm';
 let gmKey = localStorage.getItem('dk_gm_key') || '';
+let cartoKey = localStorage.getItem('dk_carto_key') || '';
 let gmSDKLoaded = false;
 let gmSDKLoading = false;
 const mapData = {};
@@ -451,6 +469,9 @@ if (gmKey) {
   setKeyStatus('warn','⏳ SDK non ancora caricato — clicca "Carica SDK" per abilitare Google Maps');
 }
 
+document.getElementById('carto-key-input').value = cartoKey;
+updateCartoKeyStatus();
+
 // Leaflet dark style
 const lst = document.createElement('style');
 lst.textContent=`.leaflet-container{background:#f0efe8;font-family:'DM Mono',monospace;}
@@ -462,7 +483,9 @@ lst.textContent=`.leaflet-container{background:#f0efe8;font-family:'DM Mono',mon
 .leaflet-popup-close-button{color:#888880!important;top:6px!important;right:8px!important;}
 .leaflet-control-zoom a{background:#ffffff!important;color:#1a1a1a!important;border-color:#c8c8be!important;font-weight:600;}
 .leaflet-control-zoom a:hover{background:#f4f4f0!important;color:#1a1a1a!important;}
-.leaflet-bar{border:1.5px solid #c8c8be!important;border-radius:7px!important;overflow:hidden;box-shadow:0 2px 6px rgba(0,0,0,.08)!important;}`;
+.leaflet-bar{border:1.5px solid #c8c8be!important;border-radius:7px!important;overflow:hidden;box-shadow:0 2px 6px rgba(0,0,0,.08)!important;}
+.leaflet-control-attribution{font-size:.6rem;background:rgba(255,255,255,.8)!important;color:#888880;}
+.leaflet-control-attribution a{color:#555550;}`;
 document.head.appendChild(lst);
 
 // ─── PROVIDER ─────────────────────────────────────────────────────────────────
@@ -483,7 +506,7 @@ function setProvider(prov, btn) {
     hint.textContent='Indirizzo · geocodificato tramite Google Geocoding (richiede SDK caricato)';
   } else {
     sub.innerHTML='// OSRM routing · OpenStreetMap · andata &amp; ritorno';
-    foot.innerHTML='Routing via <strong style="color:var(--text)">OSRM</strong> · Mappe <strong style="color:var(--text)">OpenStreetMap / CartoDB</strong><br>Tempi stimati senza traffico live · <span style="color:var(--accent)">━━</span> andata &nbsp;|&nbsp; <span style="color:var(--accent2)">╌╌</span> ritorno';
+    foot.innerHTML='Routing via <strong style="color:var(--text)">OSRM</strong> · Mappe <strong style="color:var(--text)">OpenStreetMap / CARTO</strong><br>Tempi stimati senza traffico live · <span style="color:var(--accent)">━━</span> andata &nbsp;|&nbsp; <span style="color:var(--accent2)">╌╌</span> ritorno';
     hint.textContent='Indirizzo · geocodificato via Nominatim (OpenStreetMap)';
   }
 }
@@ -526,6 +549,60 @@ function setKeyStatus(cls, msg) {
   const el = document.getElementById('key-status');
   el.className = `key-status ${cls}`;
   el.textContent = msg;
+}
+
+// ─── CARTO BASEMAPS ───────────────────────────────────────────────────────────
+// Da fine 2026 CARTO serve le tile raster senza key solo con la scritta
+// "API KEY REQUIRED" sopra. Senza key si ripiega sulle tile standard di
+// OpenStreetMap, che restano libere ma esigono un Referer valido.
+const OSM_ATTR = '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a> contributors';
+
+function baseTileLayer(){
+  if (cartoKey) {
+    return L.tileLayer(
+      `https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png?key=${encodeURIComponent(cartoKey)}`,
+      {maxZoom:19, subdomains:'abcd',
+       attribution:`${OSM_ATTR} &copy; <a href="https://carto.com/attributions" target="_blank">CARTO</a>`});
+  }
+  return L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+    {maxZoom:19, attribution:OSM_ATTR});
+}
+
+function addBaseLayer(map){
+  map._dkBase = baseTileLayer().addTo(map);
+}
+
+// Aggiorna lo sfondo delle mappe già aperte quando cambia la key
+function refreshBaseLayers(){
+  const maps = Object.values(mapData)
+    .filter(d=>d.provider!=='google' && d.instance)
+    .map(d=>d.instance);
+  if (optimalMapInstance) maps.push(optimalMapInstance);
+  maps.forEach(m=>{
+    if (m._dkBase) m.removeLayer(m._dkBase);
+    addBaseLayer(m);
+  });
+}
+
+function saveCartoKey(){
+  cartoKey = document.getElementById('carto-key-input').value.trim();
+  try {
+    if (cartoKey) localStorage.setItem('dk_carto_key', cartoKey);
+    else localStorage.removeItem('dk_carto_key');
+  } catch(e) {}
+  updateCartoKeyStatus();
+  refreshBaseLayers();
+}
+
+function updateCartoKeyStatus(){
+  const el = document.getElementById('carto-key-status');
+  if (cartoKey) {
+    el.className = 'key-status ok';
+    el.textContent = '✓ Key salvata · mappe con sfondo CARTO';
+  } else {
+    el.className = 'key-status warn';
+    el.textContent = '⚠ Nessuna key · mappe con sfondo OpenStreetMap standard';
+  }
 }
 
 // ─── LUOGHI FISSI ────────────────────────────────────────────────────────────
@@ -1003,8 +1080,8 @@ function toggleMap(i){
 function buildLeafletMap(i){
   const d=mapData[i];if(!d)return;
   const el=document.getElementById(`map-${i}`);if(!el)return;
-  const map=L.map(el,{zoomControl:true,attributionControl:false});
-  L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',{maxZoom:19,subdomains:'abcd'}).addTo(map);
+  const map=L.map(el,{zoomControl:true});
+  addBaseLayer(map);
   const fwdLL=d.fwd.geometry.map(c=>[c[1],c[0]]);
   L.polyline(fwdLL,{color:'#1a1a1a',weight:5,opacity:.9}).addTo(map);
   if(!d.sameGeom){
@@ -1023,6 +1100,7 @@ function trunc(s,n){return s.length>n?s.slice(0,n)+'…':s;}
 
 document.getElementById('origin-input').addEventListener('keydown',e=>{if(e.key==='Enter')calculate();});
 document.getElementById('gm-key-input').addEventListener('keydown',e=>{if(e.key==='Enter')loadGoogleMapsSDK();});
+document.getElementById('carto-key-input').addEventListener('keydown',e=>{if(e.key==='Enter')saveCartoKey();});
 
 // ─── ZONA OTTIMALE ────────────────────────────────────────────────────────────
 // Mappa Leaflet per la zona ottimale
@@ -1422,8 +1500,8 @@ async function calcOptimalZone(){
       if(optimalMapInstance){ try{optimalMapInstance.remove();}catch(e){} optimalMapInstance=null; }
       const mapEl=document.getElementById('optimal-map');
       if(!mapEl) return;
-      const map=L.map(mapEl,{zoomControl:true,attributionControl:false});
-      L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',{maxZoom:19,subdomains:'abcd'}).addTo(map);
+      const map=L.map(mapEl,{zoomControl:true});
+      addBaseLayer(map);
 
       const allBounds=[];
 
